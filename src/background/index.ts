@@ -1,72 +1,85 @@
-import Anthropic from '@anthropic-ai/sdk'
-import type { PortInMessage } from '../types'
+import type { BgMessage, PortInMessage } from '../types'
+
+const API_BASE = 'https://resume-forge-rho.vercel.app'
 
 // Open side panel on icon click
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(console.error)
 
-// Streaming Claude suggestions via persistent port
+// One-off requests
+chrome.runtime.onMessage.addListener((message: BgMessage, _sender, sendResponse) => {
+  if (message.type === 'FETCH_RESUMES') {
+    fetch(`${API_BASE}/api/resumes`, { credentials: 'include' })
+      .then(async (res) => {
+        if (res.status === 401) return sendResponse({ error: 401 })
+        const data = await res.json()
+        sendResponse({ data })
+      })
+      .catch((err: Error) => sendResponse({ error: err.message }))
+    return true
+  }
+})
+
+// Streaming suggestion via persistent port — proxied through ResumeForge backend
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'suggest') return
 
   port.onMessage.addListener(async (message: PortInMessage) => {
     if (message.type !== 'SUGGEST') return
 
-    const { apiKey, context, transcript, question } = message.payload
-
-    if (!apiKey) {
-      port.postMessage({ type: 'error', message: 'No API key set. Add your Anthropic API key in settings.' })
-      return
-    }
-
-    const client = new Anthropic({
-      apiKey,
-      dangerouslyAllowBrowser: true,
-    })
-
     try {
-      const stream = client.messages.stream({
-        model: 'claude-haiku-4-5',
-        max_tokens: 512,
-        system: `You are a real-time interview assistant helping a candidate during a live interview or meeting.
-
-CANDIDATE BACKGROUND:
-${context || '(No background provided — add your resume or experience in the settings panel)'}
-
-Your role:
-- Suggest concise, confident answers the candidate can use immediately
-- Reference specific experience from their background when relevant
-- Write in first person as the candidate
-- Keep responses brief: 2–4 sentences unless the question clearly needs more detail
-- Be direct — no preamble, no "Here's how you could answer..."`,
-        messages: [
-          {
-            role: 'user',
-            content: question.trim()
-              ? `Help me answer this question: "${question}"\n\nRecent conversation:\n${transcript}`
-              : `Based on this conversation, suggest what I should say next:\n\n${transcript}`,
-          },
-        ],
+      const response = await fetch(`${API_BASE}/api/meet-suggest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(message.payload),
       })
 
-      for await (const event of stream) {
-        if (
-          event.type === 'content_block_delta' &&
-          event.delta.type === 'text_delta'
-        ) {
-          port.postMessage({ type: 'chunk', text: event.delta.text })
-        }
+      if (response.status === 401) {
+        port.postMessage({ type: 'error', message: 'Sign in to ResumeForge to use Meet Sidekick.' })
+        return
+      }
+      if (!response.ok) {
+        port.postMessage({ type: 'error', message: `Request failed (${response.status})` })
+        return
       }
 
-      port.postMessage({ type: 'done' })
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (!raw || raw === '[DONE]') continue
+          try {
+            const event = JSON.parse(raw) as { type: string; text?: string; message?: string }
+            if (event.type === 'chunk') {
+              port.postMessage({ type: 'chunk', text: event.text ?? '' })
+            } else if (event.type === 'done') {
+              port.postMessage({ type: 'done' })
+            } else if (event.type === 'error') {
+              port.postMessage({ type: 'error', message: event.message ?? 'Suggestion failed' })
+            }
+          } catch {
+            // non-JSON line, skip
+          }
+        }
+      }
     } catch (err) {
-      const msg = err instanceof Anthropic.AuthenticationError
-        ? 'Invalid API key — check your Anthropic key in settings.'
-        : err instanceof Error
-        ? err.message
-        : 'Suggestion failed'
-      port.postMessage({ type: 'error', message: msg })
+      port.postMessage({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Suggestion failed',
+      })
     }
   })
 })

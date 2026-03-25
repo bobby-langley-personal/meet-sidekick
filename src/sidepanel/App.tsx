@@ -1,12 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Mic, MicOff, Loader2, Sparkles, Settings, ChevronUp,
-  RotateCcw, Copy, Check, AlertCircle,
+  RotateCcw, Copy, Check, AlertCircle, RefreshCw, ExternalLink,
 } from 'lucide-react'
-import type { PortOutMessage } from '../types'
+import type { PortOutMessage, ResumeDoc } from '../types'
 
-const STORAGE_KEY_API  = 'sidekick_api_key'
-const STORAGE_KEY_CTX  = 'sidekick_context'
+const RESUMEFORGE_URL = 'https://resume-forge-rho.vercel.app'
 const MAX_TRANSCRIPT   = 3000  // chars kept in rolling window
 
 // Web Speech API — not in lib.dom.d.ts by default
@@ -44,11 +43,12 @@ declare global {
 }
 
 export default function App() {
-  // Settings
-  const [apiKey, setApiKey]     = useState('')
-  const [context, setContext]   = useState('')
+  // Library
+  const [docs, setDocs]               = useState<ResumeDoc[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [docsLoading, setDocsLoading] = useState(true)
+  const [signedOut, setSignedOut]     = useState(false)
   const [showSettings, setShowSettings] = useState(false)
-  const [settingsSaved, setSettingsSaved] = useState(false)
 
   // Listening
   const [listening, setListening]   = useState(false)
@@ -65,23 +65,50 @@ export default function App() {
   const recogRef = useRef<SpeechRecognition | null>(null)
   const transcriptRef = useRef('')  // mutable ref for rolling window
 
-  // Load saved settings on mount
-  useEffect(() => {
-    chrome.storage.local.get([STORAGE_KEY_API, STORAGE_KEY_CTX], (result) => {
-      if (result[STORAGE_KEY_API]) setApiKey(result[STORAGE_KEY_API] as string)
-      if (result[STORAGE_KEY_CTX]) setContext(result[STORAGE_KEY_CTX] as string)
-      // Open settings if no API key yet
-      if (!result[STORAGE_KEY_API]) setShowSettings(true)
+  // Load library docs on mount
+  const loadDocs = useCallback(() => {
+    setDocsLoading(true)
+    setSignedOut(false)
+    chrome.runtime.sendMessage({ type: 'FETCH_RESUMES' }, (response: { data?: ResumeDoc[]; error?: number | string }) => {
+      setDocsLoading(false)
+      if (!response || response.error === 401) {
+        setSignedOut(true)
+        setShowSettings(true)
+        return
+      }
+      if (response.data) {
+        setDocs(response.data)
+        // Auto-select default doc (or all if none is default)
+        const defaultDoc = response.data.find((d) => d.is_default)
+        if (defaultDoc) {
+          setSelectedIds(new Set([defaultDoc.id]))
+        } else if (response.data.length > 0) {
+          setSelectedIds(new Set([response.data[0].id]))
+        }
+      }
     })
   }, [])
 
-  function saveSettings() {
-    chrome.storage.local.set({
-      [STORAGE_KEY_API]: apiKey.trim(),
-      [STORAGE_KEY_CTX]: context.trim(),
+  useEffect(() => {
+    loadDocs()
+  }, [loadDocs])
+
+  function toggleDoc(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
     })
-    setSettingsSaved(true)
-    setTimeout(() => setSettingsSaved(false), 2000)
+  }
+
+  // Build context string from selected docs
+  function buildContext(): string {
+    const selected = docs.filter((d) => selectedIds.has(d.id))
+    if (selected.length === 0) return ''
+    return selected
+      .map((d) => `${d.title}:\n${d.content.text}`)
+      .join('\n\n---\n\n')
   }
 
   // ── Speech recognition ────────────────────────────────────────────────────
@@ -137,7 +164,7 @@ export default function App() {
     setListening(false)
   }, [])
 
-  // ── Claude suggestion ─────────────────────────────────────────────────────
+  // ── Suggestion ─────────────────────────────────────────────────────────────
   function getSuggestion() {
     if (generating) return
     portRef.current?.disconnect()
@@ -165,8 +192,7 @@ export default function App() {
     port.postMessage({
       type: 'SUGGEST',
       payload: {
-        apiKey: apiKey.trim(),
-        context: context.trim(),
+        context: buildContext(),
         transcript: transcriptRef.current.trim() || transcript.trim(),
         question: question.trim(),
       },
@@ -209,32 +235,77 @@ export default function App() {
       {/* Settings panel */}
       {showSettings && (
         <div className="border-b border-zinc-800 p-4 space-y-3 bg-zinc-900/50 shrink-0">
-          <div className="space-y-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wider">Anthropic API key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-ant-..."
-              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-zinc-500 uppercase tracking-wider">Your background / resume</label>
-            <textarea
-              value={context}
-              onChange={(e) => setContext(e.target.value)}
-              placeholder="Paste your resume, work history, or key experience here. The more context, the better the suggestions."
-              rows={6}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 resize-none leading-relaxed"
-            />
-          </div>
-          <button
-            onClick={saveSettings}
-            className="w-full py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-xs font-medium transition-colors"
-          >
-            {settingsSaved ? '✓ Saved' : 'Save settings'}
-          </button>
+          {signedOut ? (
+            <div className="space-y-3">
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Sign in to ResumeForge to load your documents as interview context.
+              </p>
+              <a
+                href={RESUMEFORGE_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-xs font-medium transition-colors"
+              >
+                Sign in to ResumeForge <ExternalLink className="w-3 h-3" />
+              </a>
+              <button
+                onClick={loadDocs}
+                className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded bg-zinc-800 border border-zinc-700 hover:border-zinc-500 text-xs text-zinc-300 transition-colors"
+              >
+                <RefreshCw className="w-3 h-3" /> I've signed in — refresh
+              </button>
+            </div>
+          ) : docsLoading ? (
+            <div className="flex items-center gap-2 text-xs text-zinc-500">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading your documents…
+            </div>
+          ) : docs.length === 0 ? (
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500">No documents found in your ResumeForge library.</p>
+              <a
+                href={`${RESUMEFORGE_URL}/resumes`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+              >
+                Add documents <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-zinc-500 uppercase tracking-wider">Context from My Documents</p>
+                <button
+                  onClick={loadDocs}
+                  className="text-zinc-600 hover:text-zinc-400 transition-colors"
+                  title="Refresh"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </button>
+              </div>
+              <div className="space-y-1">
+                {docs.map((doc) => (
+                  <label key={doc.id} className="flex items-start gap-2 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(doc.id)}
+                      onChange={() => toggleDoc(doc.id)}
+                      className="mt-0.5 accent-violet-500 shrink-0"
+                    />
+                    <span className="text-xs text-zinc-300 group-hover:text-zinc-100 transition-colors leading-snug">
+                      {doc.title}
+                      {doc.is_default && (
+                        <span className="ml-1.5 text-[9px] text-violet-400 uppercase tracking-wider">default</span>
+                      )}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {selectedIds.size === 0 && (
+                <p className="text-[10px] text-amber-500/80">Select at least one document for better suggestions.</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

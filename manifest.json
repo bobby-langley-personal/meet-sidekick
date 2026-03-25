@@ -9,6 +9,9 @@
     "storage",
     "sidePanel"
   ],
+  "host_permissions": [
+    "https://resume-forge-rho.vercel.app/*"
+  ],
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"
