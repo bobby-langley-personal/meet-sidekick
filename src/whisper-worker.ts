@@ -1,7 +1,7 @@
 import { pipeline, env } from '@xenova/transformers'
 
-// Fetch ONNX Runtime WASM from CDN (avoids bundling the 8MB WASM file)
-env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/'
+// Fetch ONNX Runtime WASM from CDN — version must match installed onnxruntime-web (1.14.0)
+env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/'
 
 type ProgressCallback = (p: { status: string; progress?: number; name?: string }) => void
 
@@ -14,7 +14,7 @@ self.onmessage = async (e: MessageEvent<{ type: string; audio?: Float32Array }>)
         'automatic-speech-recognition',
         'Xenova/whisper-tiny.en',
         {
-          dtype: 'q8',
+          quantized: true,
           progress_callback: ((p: { status: string; progress?: number; name?: string }) => {
             self.postMessage({ type: 'PROGRESS', status: p.status, progress: p.progress ?? 0, name: p.name })
           }) as ProgressCallback,
