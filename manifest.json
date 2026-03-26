@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Meet Sidekick",
-  "version": "0.1.0",
-  "description": "Real-time interview assistant — listens in during meetings and suggests answers based on your experience.",
+  "version": "0.2.0",
+  "description": "Real-time interview assistant — listens to your meeting and suggests answers based on your experience.",
   "permissions": [
     "activeTab",
     "tabCapture",
@@ -10,8 +10,15 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "https://resume-forge-rho.vercel.app/*"
+    "https://resume-forge-rho.vercel.app/*",
+    "https://cdn.jsdelivr.net/*",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://cdn-lfs-us-1.huggingface.co/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"
